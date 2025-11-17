@@ -1,0 +1,248 @@
+---
+title: "Linear_Models"
+output: github_document
+---
+
+Load packages and dataset
+```{r}
+library(tidyverse)
+library(p8105.datasets)
+
+set.seed(1)
+```
+
+
+## Model Fitting
+
+Clean up the airbnb and price dataset 
+```{r}
+data("nyc_airbnb")
+
+nyc_airbnb = 
+  nyc_airbnb |> 
+  mutate(stars = review_scores_location / 2) |> 
+  rename(
+    borough = neighbourhood_group,
+    neighborhood = neighbourhood) |> 
+  filter(borough != "Staten Island") |> 
+  select(price, stars, borough, neighborhood, room_type)
+```
+
+Fit a linear regression model using `lm`.
+Outcome on the left of the `~` and predictors separated by `+` on the right.
+Interactions between variables can be specified using `*`.
+Intercept-only model (outcome ~ 1)
+Model with no intercept (outcome ~ 0 + ...)
+Model using all available predictors (outcome ~ .)
+```{r}
+fit = lm(price ~ stars + borough, data = nyc_airbnb)
+fit
+```
+
+Additional cleaning, then fit the model
+```{r}
+nyc_airbnb = 
+  nyc_airbnb |> 
+  mutate(
+    borough = fct_infreq(borough), #  reorders factor levels by frequency
+    room_type = fct_infreq(room_type))
+
+fit = lm(price ~ stars + borough, data = nyc_airbnb)
+fit
+```
+It’s important to note that changing reference categories won’t change “fit” or statistical sigificance, but can affect ease of interpretation.
+
+
+
+## Tidying Output
+
+Look at summary of fitted model
+```{r}
+summary(fit)
+summary(fit)$coef # pull out the coefficient table
+summary(fit)[["df"]]  # pull out the df
+coef(fit)
+fitted.values(fit) # pull out all fitted value
+```
+
+The `broom` package has functions for obtaining a quick summary of the model and for cleaning up the coefficient table, converting into a dataframe
+```{r}
+fit |> 
+  broom::glance()
+```
+
+```{r}
+fit |> 
+  broom::tidy()
+```
+
+```{r}
+fit |> 
+  broom::tidy() |> 
+  select(term, estimate, p.value) |> 
+  mutate(term = str_replace(term, "^borough", "Borough: ")) |> 
+  knitr::kable(digits = 3)
+```
+
+
+## Diagnostics
+
+Look at residules
+The `modelr` package can be used to add residuals and fitted values to a dataframe.
+```{r}
+modelr::add_residuals(nyc_airbnb, fit)
+```
+
+Add prediction column to the dataframe
+```{r}
+modelr::add_predictions(nyc_airbnb, fit)
+```
+
+Visualize the residules
+```{r}
+nyc_airbnb |> 
+  modelr::add_residuals(fit) |> 
+  ggplot(aes(x = borough, y = resid)) + geom_violin()
+```
+
+```{r}
+nyc_airbnb |> 
+  modelr::add_residuals(fit) |> 
+  ggplot(aes(x = stars, y = resid)) + geom_point()
+```
+
+
+## Hypothesis Testing
+
+For categorical variable/Testing multiple coefficients
+```{r}
+fit_null = lm(price ~ stars + borough, data = nyc_airbnb)
+fit_alt = lm(price ~ stars + borough + room_type, data = nyc_airbnb)
+```
+
+```{r}
+anova(fit_null, fit_alt) |> 
+  broom::tidy()
+```
+
+
+## Nesting Data
+
+Fitting models to datasets nested within variables, use `nest()` to create a list column containing datasets and fit separate models to each.
+In the airbnb data, we might think that star ratings and room type affects price differently in each borough. One way to allow this kind of effect modification is through interaction terms:
+```{r}
+nyc_airbnb |> 
+  lm(price ~ stars * borough + room_type * borough, data = _) |> 
+  broom::tidy() |> 
+  knitr::kable(digits = 3)
+```
+
+Alternatively, we can nest within boroughs and fit borough-specific models associating price with rating and room type
+Anonymous function used: `\(df)` = `function(df)`
+```{r}
+nest_lm_res =
+  nyc_airbnb |> 
+  nest(data = -borough) |> 
+  mutate(
+    models = map(data, function(df) lm(price ~ stars + room_type, data = df)),
+    results = map(models, broom::tidy)) |> 
+  select(-data, -models) |> 
+  unnest(results)
+nest_lm_res
+```
+
+Do some untidying.
+```{r}
+nest_lm_res |> 
+  select(borough, term, estimate) |> 
+  mutate(term = fct_inorder(term)) |> 
+  pivot_wider(
+    names_from = term, values_from = estimate) |> 
+  knitr::kable(digits = 3)
+```
+
+More extreme example: across neighborhoods.
+```{r}
+manhattan_airbnb =
+  nyc_airbnb |> 
+  filter(borough == "Manhattan")
+
+manhattan_nest_lm_res =
+  manhattan_airbnb |> 
+  nest(data = -neighborhood) |> 
+  mutate(
+    models = map(data, \(df) lm(price ~ stars + room_type, data = df)),
+    results = map(models, broom::tidy)) |> 
+  select(-data, -models) |> 
+  unnest(results)
+manhattan_nest_lm_res
+```
+
+Make it to a plot
+```{r}
+manhattan_nest_lm_res |> 
+  filter(str_detect(term, "room_type")) |> 
+  mutate(neighborhood = fct_reorder(neighborhood, estimate)) |>
+  ggplot(aes(x = neighborhood, y = estimate)) + 
+  geom_point() + 
+  facet_wrap(~term) + 
+  theme(axis.text.x = element_text(angle = 80, hjust = 1))
+```
+
+Tidy the results using a mixed-model spinoff of the `broom` package
+`_` place holder for dataset from last step to put in
+```{r}
+manhattan_airbnb |> 
+  lme4::lmer(price ~ stars + room_type + (1 + room_type | neighborhood), data = _) |> 
+  broom.mixed::tidy()
+```
+
+
+## Binary Outcomes
+
+Import the dataset and clean
+```{r}
+baltimore_df = 
+  read.csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/refs/heads/master/homicide-data.csv") |> 
+  filter(city == "Baltimore") |> 
+  mutate(
+    resolved = as.numeric(disposition == "Closed by arrest"),
+    victim_age = as.numeric(victim_age),
+    victim_race = fct_relevel(victim_race, "White")) |> 
+  select(resolved, victim_age, victim_race, victim_sex)
+```
+
+Fit a logistic regression for the binary “resolved” outcome and victim demographics as predictors by using the `glm` function with the family specified to account for the non-Gaussian outcome distribution.
+```{r}
+fit_logistic = 
+  baltimore_df |> 
+  glm(resolved ~ victim_age + victim_race + victim_sex, data = _, family = binomial()) 
+fit_logistic
+```
+
+Same tools we used to work with `lm` fits can be used for `glm` fits. 
+Logistic model estimates are log odds ratios, we include a step to compute odds ratios as well.
+```{r}
+fit_logistic |> 
+  broom::tidy() |> 
+  mutate(OR = exp(estimate)) |>
+  select(term, log_OR = estimate, OR, p.value) |> 
+  knitr::kable(digits = 3)
+```
+
+Compute fitted values; similarly to the estimates in the model summary, these are expressed as log odds and can be transformed to produce probabilities for each subject.
+```{r}
+baltimore_df |> 
+  modelr::add_predictions(fit_logistic) |> 
+  mutate(fitted_prob = boot::inv.logit(pred))
+```
+
+
+
+
+
+
+
+
+
+
